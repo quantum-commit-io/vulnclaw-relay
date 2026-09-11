@@ -1,0 +1,383 @@
+name: VulnClaw Autonomous Pentest Relay Node
+
+on:
+  workflow_dispatch:
+    inputs:
+      cycle_count:
+        description: 'Relay cycle counter'
+        required: false
+        default: '0'
+        type: string
+      test_handover:
+        description: 'Test mode: hand over after X minutes (0 for normal 330m)'
+        required: false
+        default: '0'
+        type: string
+      enable_funnel:
+        description: 'Expose VulnClaw Web via Tailscale Funnel / Serve'
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  vulnclaw-relay:
+    name: Run VulnClaw Relay Node
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout Current Repository
+        uses: actions/checkout@v4
+
+      # =====================================================================
+      # PHASE 1: PRE-WARMING & CENTRAL BACKUP HYDRATION
+      # =====================================================================
+      - name: Pre-Warm Environment & Hydrate State
+        id: prewarm
+        env:
+          CLONE_PAT: ${{ secrets.CLONE_PAT }}
+        run: |
+          echo "=== PHASE 1: Pre-Warming VulnClaw & Hydrating State ==="
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq curl jq rsync zip unzip git python3-pip python3-venv netcat-openbsd
+
+          # Set up dedicated Python venv for VulnClaw
+          python3 -m venv /opt/vulnclaw-venv
+          source /opt/vulnclaw-venv/bin/activate
+          pip install --upgrade pip
+
+          # Clone VulnClaw core repository
+          echo "Cloning latest VulnClaw engine..."
+          git clone --depth=1 https://github.com/Netw0rkNoob/VulnClaw.git /opt/vulnclaw
+          cd /opt/vulnclaw
+          pip install -e '.[web]' || pip install -e . || pip install requests pyyaml rich textual flask
+
+          # Clone Central State Backup from Silver-kun/Filessss
+          echo "Cloning central state storage from Silver-kun/Filessss..."
+          git config --global user.name "Silver-kun"
+          git config --global user.email "silver-kun@users.noreply.github.com"
+          rm -rf /workspace/filessss 2>/dev/null || true
+          mkdir -p /workspace
+          git clone "https://${CLONE_PAT}@github.com/Silver-kun/Filessss.git" /workspace/filessss
+
+          # Hydrate state from filessss/vulnclaw_state if it exists
+          mkdir -p ~/.vulnclaw /opt/vulnclaw/vulnclaw-output /opt/vulnclaw/evidence /opt/vulnclaw/reports /opt/vulnclaw/pocs
+          STATE_DIR="/workspace/filessss/vulnclaw_state"
+          if [ -d "$STATE_DIR" ]; then
+            echo "Found existing VulnClaw state in central backup. Restoring..."
+            rsync -a "$STATE_DIR/config/" ~/.vulnclaw/ 2>/dev/null || true
+            rsync -a "$STATE_DIR/output/" /opt/vulnclaw/vulnclaw-output/ 2>/dev/null || true
+            rsync -a "$STATE_DIR/evidence/" /opt/vulnclaw/evidence/ 2>/dev/null || true
+            rsync -a "$STATE_DIR/reports/" /opt/vulnclaw/reports/ 2>/dev/null || true
+            rsync -a "$STATE_DIR/pocs/" /opt/vulnclaw/pocs/ 2>/dev/null || true
+            echo "State hydrated successfully."
+          else
+            echo "No prior state found. Initializing fresh baseline."
+            mkdir -p "$STATE_DIR/config" "$STATE_DIR/output" "$STATE_DIR/evidence" "$STATE_DIR/reports" "$STATE_DIR/pocs"
+          fi
+
+          # Launch VulnClaw Web Dashboard in background
+          cd /opt/vulnclaw
+          echo "Launching VulnClaw Web Dashboard on port 7788..."
+          nohup /opt/vulnclaw-venv/bin/python3 -m vulnclaw web --host 0.0.0.0 --port 7788 --allow-remote > /tmp/vulnclaw.log 2>&1 &
+          echo $! > /tmp/vulnclaw.pid
+
+          # Active Health Poll: localhost:7788 (Timeout: 90s)
+          echo "Polling VulnClaw web health endpoint..."
+          WARM=false
+          for i in {1..30}; do
+            if curl -s --connect-timeout 2 http://localhost:7788/ >/dev/null 2>&1 || nc -z localhost 7788 2>/dev/null; then
+              echo "VulnClaw Web verified 100% operational in $((i * 3))s!"
+              WARM=true
+              break
+            fi
+            sleep 3
+          done
+
+          if [ "$WARM" != "true" ]; then
+            echo "WARNING: Web UI did not respond to root path, checking process PID..."
+            if kill -0 $(cat /tmp/vulnclaw.pid) 2>/dev/null; then
+              echo "Process is alive. Log excerpt:"
+              head -n 25 /tmp/vulnclaw.log || true
+            else
+              echo "ERROR: VulnClaw exited early. Log output:"
+              cat /tmp/vulnclaw.log
+              exit 1
+            fi
+          fi
+
+      # =====================================================================
+      # PHASE 2: PREDECESSOR HANDSHAKE & RUN CANCELLATION
+      # =====================================================================
+      - name: Predecessor Handshake
+        env:
+          PREV_PAT: ${{ secrets.PREV_PAT }}
+        run: |
+          echo "=== PHASE 2: Predecessor Handshake & Graceful Release ==="
+          REPOS=(
+            "quantum-commit-io/vulnclaw-relay"
+            "pixel-crafter1/vulnclaw-relay"
+          )
+          CURRENT_INDEX=-1
+          for i in "${!REPOS[@]}"; do
+            if [ "${REPOS[$i]}" = "${GITHUB_REPOSITORY}" ]; then
+              CURRENT_INDEX=$i
+              break
+            fi
+          done
+
+          if [ $CURRENT_INDEX -ge 0 ]; then
+            PREV_INDEX=$(( (CURRENT_INDEX - 1 + ${#REPOS[@]}) % ${#REPOS[@]} ))
+            PREV_REPO="${REPOS[$PREV_INDEX]}"
+            echo "Checking predecessor repository: ${PREV_REPO}..."
+
+            PREV_RUN_ID=$(GH_TOKEN="$PREV_PAT" gh run list --repo "$PREV_REPO" \
+              --json databaseId,status -q '.[] | select(.status=="in_progress" or .status=="queued") | .databaseId' 2>/dev/null | head -n 1 || echo "")
+
+            if [ -n "$PREV_RUN_ID" ] && [ "$PREV_RUN_ID" != "null" ]; then
+              echo "Cancelling predecessor run #${PREV_RUN_ID} on ${PREV_REPO}..."
+              GH_TOKEN="$PREV_PAT" gh run cancel "$PREV_RUN_ID" --repo "$PREV_REPO" 2>/dev/null || true
+
+              for sec in {1..20}; do
+                RUN_STATUS=$(GH_TOKEN="$PREV_PAT" gh run view "$PREV_RUN_ID" --repo "$PREV_REPO" --json status -q '.status' 2>/dev/null || echo "")
+                if [ "$RUN_STATUS" = "completed" ] || [ "$RUN_STATUS" = "cancelled" ]; then
+                  echo "Predecessor cleanly terminated."
+                  break
+                fi
+                sleep 2
+              done
+            fi
+          fi
+
+      # =====================================================================
+      # PHASE 3: TAILSCALE TAKEOVER WITH GOLDEN STATE & CACHED CERTS
+      # =====================================================================
+      - name: Tailscale Registration & Funnel Binding
+        env:
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+          ENABLE_FUNNEL: ${{ github.event.inputs.enable_funnel }}
+        run: |
+          echo "=== PHASE 3: Tailscale Registration (silver-vulnclaw) ==="
+          curl -fsSL https://tailscale.com/install.sh | sudo sh
+
+          sudo mkdir -p /var/run/tailscale /var/lib/tailscale/certs
+
+          # Restore Golden State and Let's Encrypt Certs from Silver-kun/Filessss
+          if [ -d "/workspace/filessss/vulnclaw_state/tailscale" ]; then
+            echo "Restoring golden tailscaled.state and Let's Encrypt certificates..."
+            sudo cp -f /workspace/filessss/vulnclaw_state/tailscale/tailscaled.state /var/lib/tailscale/tailscaled.state 2>/dev/null || true
+            sudo cp -rf /workspace/filessss/vulnclaw_state/tailscale/certs/* /var/lib/tailscale/certs/ 2>/dev/null || true
+            sudo cp -f /workspace/filessss/vulnclaw_state/tailscale/cert.* /var/lib/tailscale/certs/ 2>/dev/null || true
+            sudo chmod 600 /var/lib/tailscale/tailscaled.state 2>/dev/null || true
+            sudo chmod -R 600 /var/lib/tailscale/certs/*.key 2>/dev/null || true
+            sudo chmod -R 644 /var/lib/tailscale/certs/*.crt 2>/dev/null || true
+          fi
+
+          sudo systemctl start tailscaled
+          sudo tailscale up \
+            --authkey="${TAILSCALE_AUTHKEY}" \
+            --hostname="silver-vulnclaw" \
+            --accept-routes \
+            --reset
+
+          sudo tailscale set --shields-up=false
+          echo "Tailscale active:"
+          sudo tailscale status
+
+          # Serve VulnClaw Web on the Tailnet (Port 7788)
+          echo "Exposing port 7788 over Tailscale..."
+          sudo tailscale serve reset 2>/dev/null || true
+          sudo tailscale serve --bg --https=7788 http://localhost:7788 || sudo tailscale serve --bg --tcp=7788 tcp://localhost:7788 || true
+
+      # =====================================================================
+      # PHASE 4: 330m PRODUCTION SHIFT & 5-MINUTE LIVE SYNC DAEMON
+      # =====================================================================
+      - name: Production Shift with 5-Minute Background Git Sync
+        env:
+          CLONE_PAT: ${{ secrets.CLONE_PAT }}
+          NEXT_PAT: ${{ secrets.NEXT_PAT }}
+          FALLBACK_PAT: ${{ secrets.FALLBACK_PAT }}
+          CYCLE_COUNT: ${{ github.event.inputs.cycle_count }}
+          TEST_HANDOVER: ${{ github.event.inputs.test_handover }}
+          ENABLE_FUNNEL: ${{ github.event.inputs.enable_funnel }}
+        run: |
+          echo "=== PHASE 4: Production Shift Active ==="
+          HANDOVER_MINUTE=330
+          if [ -n "$TEST_HANDOVER" ] && [ "$TEST_HANDOVER" -gt 0 ] 2>/dev/null; then
+            echo ">>> TEST HANDOVER OVERRIDE: ${TEST_HANDOVER} minute(s) <<<"
+            HANDOVER_MINUTE=$TEST_HANDOVER
+          fi
+
+          # -------------------------------------------------------------
+          # BACKGROUND LIVE SYNC DAEMON (Every 300 Seconds)
+          # -------------------------------------------------------------
+          sync_state_to_git() {
+            local label="$1"
+            echo "[$(date +'%T')] [SYNC-DAEMON] Syncing VulnClaw state: ${label}..."
+            cd /workspace/filessss
+            mkdir -p vulnclaw_state/config vulnclaw_state/output vulnclaw_state/evidence vulnclaw_state/reports vulnclaw_state/pocs
+
+            rsync -a --delete ~/.vulnclaw/ vulnclaw_state/config/ 2>/dev/null || true
+            rsync -a /opt/vulnclaw/vulnclaw-output/ vulnclaw_state/output/ 2>/dev/null || true
+            rsync -a /opt/vulnclaw/evidence/ vulnclaw_state/evidence/ 2>/dev/null || true
+            rsync -a /opt/vulnclaw/reports/ vulnclaw_state/reports/ 2>/dev/null || true
+            rsync -a /opt/vulnclaw/pocs/ vulnclaw_state/pocs/ 2>/dev/null || true
+
+            git add vulnclaw_state/
+            if ! git diff --cached --quiet; then
+              echo "[SYNC-DAEMON] Changes detected! Committing and pushing with rebase..."
+              git commit -m "Auto-backup: VulnClaw State (${label}) [skip ci]" || true
+              for attempt in 1 2 3 4; do
+                if git pull --rebase -X theirs "https://${CLONE_PAT}@github.com/Silver-kun/Filessss.git" main 2>/dev/null && \
+                   git push "https://${CLONE_PAT}@github.com/Silver-kun/Filessss.git" HEAD:main 2>/dev/null; then
+                  echo "[SYNC-DAEMON] Push successful on attempt ${attempt}."
+                  break
+                fi
+                echo "[SYNC-DAEMON] Push contention. Retrying in $((attempt * 3))s..."
+                sleep $((attempt * 3))
+              done
+            else
+              echo "[SYNC-DAEMON] No changes to sync."
+            fi
+          }
+
+          # Launch background sync daemon in loop
+          (
+            while true; do
+              sleep 300
+              sync_state_to_git "Periodic 5m Checkpoint"
+            done
+          ) &
+          SYNC_PID=$!
+          echo $SYNC_PID > /tmp/sync_daemon.pid
+
+          # Main Watchdog Loop
+          ELAPSED=0
+          while [ $ELAPSED -lt $HANDOVER_MINUTE ]; do
+            sleep 60
+            ELAPSED=$((ELAPSED + 1))
+
+            # Watchdog: VulnClaw Web Process
+            PID=$(cat /tmp/vulnclaw.pid 2>/dev/null || echo "")
+            if [ -n "$PID" ] && ! kill -0 $PID 2>/dev/null; then
+              echo "[$(date +'%T')] ALERT: VulnClaw crashed! Restarting..."
+              cd /opt/vulnclaw
+              nohup /opt/vulnclaw-venv/bin/python3 -m vulnclaw web --host 0.0.0.0 --port 7788 --allow-remote >> /tmp/vulnclaw.log 2>&1 &
+              echo $! > /tmp/vulnclaw.pid
+            fi
+
+            if [ $((ELAPSED % 15)) -eq 0 ] || [ $HANDOVER_MINUTE -le 10 ]; then
+              echo "[$(date +'%T')] Shift Progress: ${ELAPSED}/${HANDOVER_MINUTE}m | VulnClaw Healthy"
+            fi
+          done
+
+          # Kill periodic daemon before final flush
+          kill -9 $(cat /tmp/sync_daemon.pid 2>/dev/null) 2>/dev/null || true
+
+          # -------------------------------------------------------------
+          # PRE-HANDOVER ATOMIC FLUSH & SUCCESSOR DISPATCH
+          # -------------------------------------------------------------
+          echo "=== HANDOVER THRESHOLD REACHED: Executing Pre-Handover Flush ==="
+          sync_state_to_git "Pre-Handover Final Flush"
+
+          REPOS=(
+            "quantum-commit-io/vulnclaw-relay"
+            "pixel-crafter1/vulnclaw-relay"
+          )
+          CURRENT_INDEX=-1
+          for i in "${!REPOS[@]}"; do
+            if [ "${REPOS[$i]}" = "${GITHUB_REPOSITORY}" ]; then
+              CURRENT_INDEX=$i
+              break
+            fi
+          done
+          [ $CURRENT_INDEX -eq -1 ] && CURRENT_INDEX=0
+
+          NEXT_INDEX=$(( (CURRENT_INDEX + 1) % ${#REPOS[@]} ))
+          FALLBACK_INDEX=$(( (CURRENT_INDEX + 2) % ${#REPOS[@]} ))
+          PRIMARY_TARGET="${REPOS[$NEXT_INDEX]}"
+          FALLBACK_TARGET="${REPOS[$FALLBACK_INDEX]}"
+          NEXT_CYCLE=$((CYCLE_COUNT + 1))
+
+          dispatch_runner() {
+            local target="$1"
+            local token="$2"
+            for attempt in 1 2 3 4; do
+              echo "Dispatch attempt $attempt to ${target}..."
+              if GH_TOKEN="$token" gh workflow run vulnclaw_relay.yml \
+                --repo "$target" \
+                -f cycle_count="$NEXT_CYCLE" \
+                -f test_handover="${TEST_HANDOVER:-0}" \
+                -f enable_funnel="$ENABLE_FUNNEL"; then
+                echo "Successfully triggered workflow on ${target}."
+                return 0
+              fi
+              sleep 15
+            done
+            return 1
+          }
+
+          if ! dispatch_runner "$PRIMARY_TARGET" "$NEXT_PAT"; then
+            echo "Primary dispatch failed. Activating fallback: ${FALLBACK_TARGET}..."
+            dispatch_runner "$FALLBACK_TARGET" "$FALLBACK_PAT" || echo "CRITICAL: All dispatches failed!"
+          fi
+
+          echo "Successor dispatched! Entering active standby overlap (15m)..."
+          for wait_min in {1..15}; do
+            sleep 60
+            echo "[$(date +'%T')] Standby overlap active (+${wait_min}m)..."
+          done
+
+      # =====================================================================
+      # PHASE 5: DUAL REDUNDANCY TEARDOWN & RECOVERY GUARANTEE
+      # =====================================================================
+      - name: Final Emergency Sync to Central Storage
+        if: always()
+        env:
+          CLONE_PAT: ${{ secrets.CLONE_PAT }}
+        run: |
+          echo "=== PHASE 5: Final Teardown Safety Sync ==="
+          if [ -d "/workspace/filessss" ] && [ -n "$CLONE_PAT" ]; then
+            cd /workspace/filessss
+            mkdir -p vulnclaw_state/config vulnclaw_state/output vulnclaw_state/evidence vulnclaw_state/reports vulnclaw_state/pocs
+            rsync -a --delete ~/.vulnclaw/ vulnclaw_state/config/ 2>/dev/null || true
+            rsync -a /opt/vulnclaw/vulnclaw-output/ vulnclaw_state/output/ 2>/dev/null || true
+            rsync -a /opt/vulnclaw/evidence/ vulnclaw_state/evidence/ 2>/dev/null || true
+            rsync -a /opt/vulnclaw/reports/ vulnclaw_state/reports/ 2>/dev/null || true
+            rsync -a /opt/vulnclaw/pocs/ vulnclaw_state/pocs/ 2>/dev/null || true
+            git add vulnclaw_state/
+            if ! git diff --cached --quiet; then
+              git commit -m "Auto-refresh: final teardown session sync [skip ci]" || true
+              git pull --rebase -X theirs "https://${CLONE_PAT}@github.com/Silver-kun/Filessss.git" main 2>/dev/null || true
+              git push "https://${CLONE_PAT}@github.com/Silver-kun/Filessss.git" HEAD:main 2>/dev/null || true
+            fi
+          fi
+          sudo tailscale down 2>/dev/null || true
+
+      # TIER 2 REDUNDANCY: Actions Artifact Upload (30-day retention)
+      - name: Archive VulnClaw State Bundle as Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vulnclaw-state-cycle-${{ github.event.inputs.cycle_count }}-${{ github.run_id }}
+          path: |
+            /opt/vulnclaw/vulnclaw-output/
+            /opt/vulnclaw/evidence/
+            /opt/vulnclaw/reports/
+            /opt/vulnclaw/pocs/
+          retention-days: 30
+          if-no-files-found: warn
+          overwrite: true
+
+      # TIER 3 REDUNDANCY: Emergency Base64 Console Dump
+      - name: Emergency Base64 Console State Dump
+        if: failure() || cancelled()
+        run: |
+          echo "=== EMERGENCY DISASTER RECOVERY PROTOCOL ==="
+          EMERGENCY_TAR="/tmp/vulnclaw_emergency_${GITHUB_RUN_ID}.tar.gz"
+          tar -czf "$EMERGENCY_TAR" -C /opt/vulnclaw vulnclaw-output reports pocs evidence 2>/dev/null || true
+          if [ -f "$EMERGENCY_TAR" ]; then
+            echo "--- BEGIN VULNCLAW EMERGENCY PAYLOAD B64 ---"
+            base64 -w 120 "$EMERGENCY_TAR"
+            echo "--- END VULNCLAW EMERGENCY PAYLOAD B64 ---"
+          fi
