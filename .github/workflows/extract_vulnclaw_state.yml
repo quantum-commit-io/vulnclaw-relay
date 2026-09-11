@@ -1,0 +1,80 @@
+name: Extract Golden Tailscale State & Certs for silver-vulnclaw
+
+on:
+  workflow_dispatch:
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Tailscale
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sudo sh
+          sudo systemctl stop tailscaled 2>/dev/null || true
+          sudo rm -rf /var/lib/tailscale/*
+          sudo mkdir -p /var/lib/tailscale/certs
+
+      - name: Authenticate as silver-vulnclaw & Obtain Certs
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+          CLONE_PAT: ${{ secrets.CLONE_PAT }}
+        run: |
+          sudo systemctl start tailscaled
+          sudo tailscale up \
+            --authkey="${TAILSCALE_AUTH_KEY}" \
+            --hostname="silver-vulnclaw" \
+            --accept-routes \
+            --reset
+
+          sudo tailscale set --shields-up=false
+
+          echo "Checking registered status..."
+          sudo tailscale status
+
+          echo "Resolving full MagicDNS / Tailnet domain name..."
+          TS_DOMAIN=$(sudo tailscale status --json | jq -r '.Self.DNSName' | sed 's/\.$//')
+          echo "Discovered Full Node FQDN: ${TS_DOMAIN}"
+
+          echo "Requesting Let's Encrypt certificates for ${TS_DOMAIN}..."
+          sudo tailscale cert "${TS_DOMAIN}"
+          ls -la ${TS_DOMAIN}.*
+
+          # Flush daemon state to disk
+          sudo systemctl stop tailscaled
+
+          git config --global user.name "Silver-kun"
+          git config --global user.email "silver-kun@users.noreply.github.com"
+
+          rm -rf filessss 2>/dev/null || true
+          git clone "https://${CLONE_PAT}@github.com/Silver-kun/Filessss.git" filessss
+          cd filessss
+          mkdir -p vulnclaw_state/tailscale/certs
+
+          # Save state and certs into central backup repo
+          sudo cp -f /var/lib/tailscale/tailscaled.state vulnclaw_state/tailscale/tailscaled.state
+          sudo cp -f ../${TS_DOMAIN}.crt vulnclaw_state/tailscale/certs/${TS_DOMAIN}.crt
+          sudo cp -f ../${TS_DOMAIN}.key vulnclaw_state/tailscale/certs/${TS_DOMAIN}.key
+          sudo cp -f ../${TS_DOMAIN}.crt vulnclaw_state/tailscale/cert.crt
+          sudo cp -f ../${TS_DOMAIN}.key vulnclaw_state/tailscale/cert.key
+
+          sudo chown -R runner:docker vulnclaw_state/tailscale/
+          chmod 600 vulnclaw_state/tailscale/tailscaled.state
+          chmod -R 600 vulnclaw_state/tailscale/certs/*.key* 2>/dev/null || true
+          chmod -R 644 vulnclaw_state/tailscale/certs/*.crt* 2>/dev/null || true
+          chmod 600 vulnclaw_state/tailscale/cert.key 2>/dev/null || true
+          chmod 644 vulnclaw_state/tailscale/cert.crt 2>/dev/null || true
+
+          git add vulnclaw_state/tailscale/
+          git status
+          git commit -m "feat(tailscale): save golden tailscaled.state and Let's Encrypt certs for silver-vulnclaw [skip ci]" || true
+          git pull --rebase -X theirs "https://${CLONE_PAT}@github.com/Silver-kun/Filessss.git" main
+          git push "https://${CLONE_PAT}@github.com/Silver-kun/Filessss.git" HEAD:main
+          echo ">>> STATE AND CERTS PUSHED SUCCESSFULLY TO Silver-kun/Filessss <<<"
+
+      - name: Backup Print Base64
+        if: always()
+        run: |
+          echo "=== EMERGENCY BASE64 BACKUP (TAILSCALE_STATE_B64) ==="
+          sudo tar -cz -C filessss/vulnclaw_state/tailscale/ . 2>/dev/null | base64 -w 0 || true
+          echo ""
+          echo "=== END BASE64 BACKUP ==="
