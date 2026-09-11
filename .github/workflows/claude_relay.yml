@@ -2,22 +2,6 @@ name: Autonomous Claude Security Relay Node
 
 on:
   workflow_dispatch:
-    inputs:
-      cycle_count:
-        description: 'Relay cycle counter'
-        required: false
-        default: '0'
-        type: string
-      test_handover:
-        description: 'Test mode: hand over after X minutes (0 for normal 330m)'
-        required: false
-        default: '0'
-        type: string
-      enable_funnel:
-        description: 'Expose Web Terminal via Tailscale Funnel / Serve'
-        required: false
-        default: 'true'
-        type: string
 
 jobs:
   claude-security-relay:
