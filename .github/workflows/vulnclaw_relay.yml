@@ -1,4 +1,4 @@
-name: Autonomous Claude Security Relay Node
+name: VulnClaw Autonomous Pentest Relay Node
 
 on:
   workflow_dispatch:
@@ -14,8 +14,8 @@ on:
         default: '0'
         type: string
       enable_funnel:
-        description: 'Expose Web Terminal via Tailscale Funnel / Serve'
-        required: false
+        description: 'Expose service via Tailscale Funnel / Serve'
+        required: true
         default: true
         type: boolean
 
