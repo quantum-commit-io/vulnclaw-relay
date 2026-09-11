@@ -16,8 +16,8 @@ on:
       enable_funnel:
         description: 'Expose Web Terminal via Tailscale Funnel / Serve'
         required: false
-        default: true
-        type: boolean
+        default: 'true'
+        type: string
 
 jobs:
   claude-security-relay:
