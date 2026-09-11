@@ -176,6 +176,7 @@ jobs:
           # Restore Golden State and Let's Encrypt Certs from Silver-kun/Filessss
           if [ -d "/workspace/filessss/vulnclaw_state/tailscale" ]; then
             echo "Restoring golden tailscaled.state and Let's Encrypt certificates..."
+            sudo systemctl stop tailscaled 2>/dev/null || true
             sudo cp -f /workspace/filessss/vulnclaw_state/tailscale/tailscaled.state /var/lib/tailscale/tailscaled.state 2>/dev/null || true
             sudo cp -rf /workspace/filessss/vulnclaw_state/tailscale/certs/* /var/lib/tailscale/certs/ 2>/dev/null || true
             sudo cp -f /workspace/filessss/vulnclaw_state/tailscale/cert.* /var/lib/tailscale/certs/ 2>/dev/null || true
@@ -183,10 +184,6 @@ jobs:
             sudo chmod -R 600 /var/lib/tailscale/certs/*.key 2>/dev/null || true
             sudo chmod -R 644 /var/lib/tailscale/certs/*.crt 2>/dev/null || true
           fi
-
-          # Evict previous dead node identity so Tailscale never suffixes hostname
-          sudo tailscale down 2>/dev/null || true
-          sudo tailscale logout 2>/dev/null || true
 
           sudo systemctl start tailscaled
           sudo tailscale up \
