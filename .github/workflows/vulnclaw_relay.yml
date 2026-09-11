@@ -56,8 +56,9 @@ jobs:
           echo "Cloning central state storage from Silver-kun/Filessss..."
           git config --global user.name "Silver-kun"
           git config --global user.email "silver-kun@users.noreply.github.com"
+          sudo mkdir -p /workspace
+          sudo chown -R runner:docker /workspace
           rm -rf /workspace/filessss 2>/dev/null || true
-          mkdir -p /workspace
           git clone "https://${CLONE_PAT}@github.com/Silver-kun/Filessss.git" /workspace/filessss
 
           # Hydrate state from filessss/vulnclaw_state if it exists
@@ -185,9 +186,20 @@ jobs:
           sudo tailscale status
 
           # Serve VulnClaw Web on the Tailnet (Port 7788)
-          echo "Exposing port 7788 over Tailscale..."
+          echo "Exposing port 7788 securely over Tailnet..."
           sudo tailscale serve reset 2>/dev/null || true
           sudo tailscale serve --bg --https=7788 http://localhost:7788 || sudo tailscale serve --bg --tcp=7788 tcp://localhost:7788 || true
+
+          # Sync Serve configuration with Tailscale control plane
+          echo "Syncing Serve configuration with Tailscale control plane..."
+          sudo systemctl restart tailscaled
+          for _ in $(seq 1 15); do
+            if sudo tailscale status --json 2>/dev/null | grep -q '"BackendState":\s*"Running"'; then
+              break
+            fi
+            sleep 1
+          done
+          sudo tailscale serve status || true
 
       # =====================================================================
       # PHASE 4: 330m PRODUCTION SHIFT & 5-MINUTE LIVE SYNC DAEMON
