@@ -90,6 +90,10 @@ jobs:
           # Launch VulnClaw Web Dashboard on local loopback (trusted operator mode)
           cd /opt/vulnclaw
           echo "Launching VulnClaw Web Dashboard on 127.0.0.1:7788..."
+          export VULNCLAW_LLM_PROVIDER="custom"
+          export VULNCLAW_LLM_MODEL="gemini-3.8-flash"
+          export VULNCLAW_LLM_BASE_URL="https://silver-trial.tail042f54.ts.net/v1"
+          export VULNCLAW_LLM_API_KEY="123456"
           nohup /opt/vulnclaw-venv/bin/python3 -m vulnclaw web --host 127.0.0.1 --port 7788 > /tmp/vulnclaw.log 2>&1 &
           echo $! > /tmp/vulnclaw.pid
 
@@ -285,6 +289,10 @@ jobs:
             if [ -n "$PID" ] && ! kill -0 $PID 2>/dev/null; then
               echo "[$(date +'%T')] ALERT: VulnClaw crashed! Restarting..."
               cd /opt/vulnclaw
+              export VULNCLAW_LLM_PROVIDER="custom"
+              export VULNCLAW_LLM_MODEL="gemini-3.8-flash"
+              export VULNCLAW_LLM_BASE_URL="https://silver-trial.tail042f54.ts.net/v1"
+              export VULNCLAW_LLM_API_KEY="123456"
               nohup /opt/vulnclaw-venv/bin/python3 -m vulnclaw web --host 127.0.0.1 --port 7788 >> /tmp/vulnclaw.log 2>&1 &
               echo $! > /tmp/vulnclaw.pid
             fi
