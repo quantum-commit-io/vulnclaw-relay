@@ -222,24 +222,34 @@ EOF
           TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
           ENABLE_FUNNEL: ${{ github.event.inputs.enable_funnel }}
         run: |
-          echo "=== PHASE 3: Tailscale Registration (silver-claw) ==="
+          echo "=== PHASE 3: Tailscale Registration (silver-vulnclaw) ==="
           curl -fsSL https://tailscale.com/install.sh | sudo sh
 
           sudo mkdir -p /var/run/tailscale /var/lib/tailscale/certs
 
-          # Restore Golden State and Let's Encrypt Certs from central storage
-          if [ -d "/workspace/filessss/claude_agent_state/tailscale" ]; then
-            echo "Restoring golden tailscaled.state and Let's Encrypt certificates..."
+          # Restore Golden State and Let's Encrypt Certs from central storage (prioritizing existing vulnclaw_state)
+          TS_RESTORE_DIR=""
+          if [ -d "/workspace/filessss/vulnclaw_state/tailscale" ]; then
+            TS_RESTORE_DIR="/workspace/filessss/vulnclaw_state/tailscale"
+          elif [ -d "/workspace/filessss/claude_agent_state/tailscale" ]; then
+            TS_RESTORE_DIR="/workspace/filessss/claude_agent_state/tailscale"
+          fi
+
+          if [ -n "$TS_RESTORE_DIR" ]; then
+            echo "Restoring golden tailscaled.state and Let's Encrypt certificates from ${TS_RESTORE_DIR}..."
             sudo systemctl stop tailscaled 2>/dev/null || true
-            sudo cp -f /workspace/filessss/claude_agent_state/tailscale/tailscaled.state /var/lib/tailscale/tailscaled.state 2>/dev/null || true
-            sudo cp -rf /workspace/filessss/claude_agent_state/tailscale/certs/* /var/lib/tailscale/certs/ 2>/dev/null || true
+            sudo cp -f "$TS_RESTORE_DIR/tailscaled.state" /var/lib/tailscale/tailscaled.state 2>/dev/null || true
+            sudo cp -rf "$TS_RESTORE_DIR/certs/"* /var/lib/tailscale/certs/ 2>/dev/null || true
+            sudo cp -f "$TS_RESTORE_DIR/cert."* /var/lib/tailscale/certs/ 2>/dev/null || true
             sudo chmod 600 /var/lib/tailscale/tailscaled.state 2>/dev/null || true
+            sudo chmod -R 600 /var/lib/tailscale/certs/*.key 2>/dev/null || true
+            sudo chmod -R 644 /var/lib/tailscale/certs/*.crt 2>/dev/null || true
           fi
 
           sudo systemctl start tailscaled
           sudo tailscale up \
             --authkey="${TAILSCALE_AUTHKEY}" \
-            --hostname="silver-claw" \
+            --hostname="silver-vulnclaw" \
             --accept-routes \
             --reset
 
@@ -371,7 +381,7 @@ EOF
               DISPATCHED=false
               for token in "$NEXT_PAT" "$FALLBACK_PAT" "$CLONE_PAT"; do
                 if [ -n "$token" ]; then
-                  if GH_TOKEN="$token" gh workflow run vulnclaw_relay.yml \
+                  if GH_TOKEN="$token" gh workflow run claude_relay.yml \
                     --repo "$NEXT_REPO" \
                     -f cycle_count="${NEW_CYCLE}" \
                     -f test_handover="${TEST_HANDOVER}" \
