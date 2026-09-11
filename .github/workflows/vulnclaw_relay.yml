@@ -52,6 +52,16 @@ jobs:
           cd /opt/vulnclaw
           pip install -e '.[web]' || pip install -e . || pip install requests pyyaml rich textual flask
 
+          # Build VulnClaw React frontend UI
+          if [ -d "/opt/vulnclaw/frontend" ]; then
+            echo "Building VulnClaw React frontend UI..."
+            cd /opt/vulnclaw/frontend
+            npm ci --prefer-offline --no-audit || npm install --no-audit
+            npm run build
+            echo "Frontend build completed. Contents of frontend/dist:"
+            ls -la dist/ || true
+          fi
+
           # Clone Central State Backup from Silver-kun/Filessss
           echo "Cloning central state storage from Silver-kun/Filessss..."
           git config --global user.name "Silver-kun"
